@@ -1,0 +1,73 @@
+{
+  "name": "WF_01_AgentRunner",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "Start",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [220, 220]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $json;\n\nconst run_id = input.run_id;\nconst stage = input.stage;\nconst system_prompt = input.system_prompt;\nconst user_payload = input.user_payload;\n\nif (!run_id || !stage || !system_prompt) {\n  return [{ ok: false, error: 'Missing required inputs: run_id, stage, system_prompt', raw_text: null, output_json: null }];\n}\n\nreturn [{ run_id, stage, system_prompt, user_payload: user_payload ?? {} }];"
+      },
+      "id": "ValidateInputs",
+      "name": "Validate Inputs",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [430, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.OPENAI_BASE_URL || \"https://api.openai.com/v1/responses\"}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": $env.OPENAI_MODEL || \"gpt-4.1-mini\",\n  \"input\": [\n    {\n      \"role\": \"system\",\n      \"content\": [\n        {\"type\":\"text\",\"text\": $json.system_prompt + \"\\n\\nCRITICAL: Output ONLY valid JSON. No markdown. No prose outside JSON.\"}\n      ]\n    },\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\"type\":\"text\",\"text\": \"Payload:\\n\" + JSON.stringify($json.user_payload, null, 2) + \"\\n\\nOutput ONLY JSON.\"}\n      ]\n    }\n  ]\n}"
+      },
+      "id": "LLMCall",
+      "name": "LLM Call (Strict JSON)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [660, 220]
+    },
+    {
+      "parameters": {
+        "functionCode": "const raw = $json;\n\nconst text = raw?.body?.output?.[0]?.content?.[0]?.text\n  ?? raw?.body?.output_text\n  ?? raw?.body?.choices?.[0]?.message?.content\n  ?? null;\n\nif (!text) {\n  return [{ ok: false, error: 'LLM returned no text', raw_text: null, output_json: null }];\n}\n\ntry {\n  const parsed = JSON.parse(text);\n  return [{ ok: true, error: null, raw_text: text, output_json: parsed }];\n} catch (e) {\n  return [{ ok: false, error: 'LLM output not valid JSON', raw_text: text, output_json: null }];\n}"
+      },
+      "id": "ParseJSON",
+      "name": "Parse JSON",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [890, 220]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [[{ "node": "Validate Inputs", "type": "main", "index": 0 }]]
+    },
+    "Validate Inputs": {
+      "main": [[{ "node": "LLM Call (Strict JSON)", "type": "main", "index": 0 }]]
+    },
+    "LLM Call (Strict JSON)": {
+      "main": [[{ "node": "Parse JSON", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionTimeout": 3600,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none"
+  },
+  "versionId": "1"
+}

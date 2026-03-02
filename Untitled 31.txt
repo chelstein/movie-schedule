@@ -1,0 +1,479 @@
+{
+  "name": "WF_00_Supervisor_Agentic_Pipeline_Phish",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "ManualTrigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [180, 220]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\n\n// Pass run_id to resume; otherwise create a new one.\nconst run_id = $json.run_id || `phish-${Date.now()}`;\n\nconst defaultState = {\n  run_id,\n  stage: 'PM_SCOPE',\n  createdAt: now,\n  updatedAt: now,\n  status: 'RUNNING',\n  blockers: [],\n  approvals: [],\n  context: {\n    system: 'Email phishing workflow',\n    source: 'Microsoft Graph Mail',\n    stack: ['n8n', 'Postgres', 'Microsoft Graph', 'MISP', 'IntelOwl', 'IRIS', 'Elastic'],\n    constraints: {\n      noSecretsInArtifacts: true,\n      mustBeIdempotent: true,\n      mustHaveRunbook: true,\n      mustHandleRateLimits: true\n    }\n  },\n  artifacts: {\n    PRD: null,\n    TECH_SPEC: null,\n    IMPLEMENTATION: null,\n    SR_REVIEW: null,\n    SECENG_COMPUTE_REVIEW: null,\n    QA_REPORT: null,\n    COMPLIANCE: null,\n    TESTING_PREPROD: null,\n    SMOKE_TEST: null,\n    DEPLOY_REPORT: null,\n    MANAGER_REVIEW: null,\n    SR_MANAGER_REVIEW: null,\n    DIRECTOR_REVIEW: null\n  },\n  gates: {\n    sr_review: { status: 'PENDING', required: true },\n    seceng: { status: 'PENDING', required: true },\n    qa: { status: 'PENDING', required: true },\n    compliance: { status: 'PENDING', required: true },\n    manager: { status: 'PENDING', required: true },\n    sr_manager: { status: 'PENDING', required: true },\n    director: { status: 'PENDING', required: true }\n  }\n};\n\nreturn [{ run_id, defaultState }];"
+      },
+      "id": "Init",
+      "name": "Init Run",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [400, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT state_json FROM agentic_runs WHERE run_id = $1",
+        "values": "={{[$json.run_id]}}"
+      },
+      "id": "PgLoad",
+      "name": "Postgres: Load State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [620, 220]
+    },
+    {
+      "parameters": {
+        "functionCode": "const run_id = $json.run_id;\nconst defaultState = $json.defaultState;\n\nconst rows = $json?.data ?? $json?.rows ?? [];\nconst first = rows?.[0] || null;\n\nlet state;\nif (first && first.state_json) state = first.state_json;\nelse state = defaultState;\n\nreturn [{ run_id, state }];"
+      },
+      "id": "SelectOrInit",
+      "name": "Use Loaded Or Init",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [840, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO agentic_runs (run_id, stage, status, state_json) VALUES ($1, $2, $3, $4)\nON CONFLICT (run_id) DO UPDATE SET stage = EXCLUDED.stage, status = EXCLUDED.status, state_json = EXCLUDED.state_json, updated_at = now()",
+        "values": "={{[$json.state.run_id, $json.state.stage, $json.state.status || 'RUNNING', JSON.stringify($json.state)]}}"
+      },
+      "id": "PgUpsertInitial",
+      "name": "Postgres: Upsert State (Initial)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1060, 220]
+    },
+    {
+      "parameters": {
+        "propertyName": "state.stage",
+        "rules": [
+          { "operation": "equal", "value": "PM_SCOPE" },
+          { "operation": "equal", "value": "JR_FRAME" },
+          { "operation": "equal", "value": "ENG_BUILD" },
+          { "operation": "equal", "value": "SR_REVIEW" },
+          { "operation": "equal", "value": "SECENG_COMPUTE_REVIEW" },
+          { "operation": "equal", "value": "QA" },
+          { "operation": "equal", "value": "COMPLIANCE" },
+          { "operation": "equal", "value": "TESTING_PREPROD" },
+          { "operation": "equal", "value": "SMOKE_TEST" },
+          { "operation": "equal", "value": "DEPLOY" },
+          { "operation": "equal", "value": "MANAGER_REVIEW" },
+          { "operation": "equal", "value": "SR_MANAGER_REVIEW" },
+          { "operation": "equal", "value": "DIRECTOR_REVIEW" }
+        ]
+      },
+      "id": "SwitchStage",
+      "name": "Switch Stage",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [1280, 220]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'PM_SCOPE', system_prompt: 'You are the PM agent. Produce PRD JSON for an email phishing workflow sourced from Microsoft Graph Mail. Output ONLY JSON with keys: problem, goals, non_goals, scope, acceptance_criteria, metrics, edge_cases, assumptions.', user_payload: { context: $json.state.context } } ]}}"
+      },
+      "id": "CallPM",
+      "name": "Call AgentRunner: PM_SCOPE",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 60]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'PM_SCOPE', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nstate.artifacts.PRD = { createdAt: now, prd: result.output_json };\nstate.stage = 'JR_FRAME';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'PM_SCOPE', artifact: state.artifacts.PRD }];"
+      },
+      "id": "SavePM",
+      "name": "Save PRD + Advance",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 60]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'JR_FRAME', system_prompt: 'You are the Junior Engineer (Framer). Convert PRD into TECH_SPEC. Output ONLY JSON keys: architecture, components, data_flow, api_contracts, data_model, retries, idempotency, logging, metrics, runbook_outline, assumptions.', user_payload: { prd: $json.state.artifacts.PRD, context: $json.state.context } } ]}}"
+      },
+      "id": "CallJR",
+      "name": "Call AgentRunner: JR_FRAME",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 140]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'JR_FRAME', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nstate.artifacts.TECH_SPEC = { createdAt: now, spec: result.output_json };\nstate.stage = 'ENG_BUILD';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'JR_FRAME', artifact: state.artifacts.TECH_SPEC }];"
+      },
+      "id": "SaveJR",
+      "name": "Save TECH_SPEC + Advance",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 140]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'ENG_BUILD', system_prompt: 'You are the Engineer (Builder). Implement per TECH_SPEC for Microsoft Graph Mail phishing intake. Output ONLY JSON keys: files (array {path, content}), env_vars (names only), commands_to_run, unit_tests, notes. Never include secrets.', user_payload: { tech_spec: $json.state.artifacts.TECH_SPEC, context: $json.state.context } } ]}}"
+      },
+      "id": "CallENG",
+      "name": "Call AgentRunner: ENG_BUILD",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 220]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'ENG_BUILD', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nstate.artifacts.IMPLEMENTATION = { createdAt: now, impl: result.output_json };\nstate.stage = 'SR_REVIEW';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'ENG_BUILD', artifact: state.artifacts.IMPLEMENTATION }];"
+      },
+      "id": "SaveENG",
+      "name": "Save IMPLEMENTATION + Advance",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 220]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'SR_REVIEW', system_prompt: 'You are the Senior Engineer reviewer. Review correctness, idempotency, failure modes, security basics. Output ONLY JSON keys: findings (array {severity, area, description, evidence}), required_changes (array), approve (boolean), notes.', user_payload: { tech_spec: $json.state.artifacts.TECH_SPEC, implementation: $json.state.artifacts.IMPLEMENTATION } } ]}}"
+      },
+      "id": "CallSR",
+      "name": "Call AgentRunner: SR_REVIEW",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SR_REVIEW', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst review = result.output_json;\nstate.artifacts.SR_REVIEW = { createdAt: now, review };\n\nconst findings = review.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (review.approve === false || hasHigh) {\n  state.gates.sr_review.status = 'FAILED';\n  state.blockers.push({ severity: 'HIGH', stage: 'SR_REVIEW', reason: 'SR review failed', details: review.required_changes || [] });\n  state.stage = 'ENG_BUILD';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'SR_REVIEW', artifact: state.artifacts.SR_REVIEW }];\n}\n\nstate.gates.sr_review.status = 'PASSED';\nstate.stage = 'SECENG_COMPUTE_REVIEW';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'SR_REVIEW', artifact: state.artifacts.SR_REVIEW }];"
+      },
+      "id": "SaveSR",
+      "name": "Save SR Review + Gate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 300]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'SECENG_COMPUTE_REVIEW', system_prompt: 'You are Security Engineering focused on computational overhead + security/perf risk. Review call volume, rate-limit risk, retry storms, payload/attachment handling, concurrency, logging volume/PII leakage, and expensive parsing/regex. Output ONLY JSON keys: summary, estimated_vendor_calls_per_email, worst_case_calls_per_minute, hotspots, rate_limit_risks, retry_storm_risks, payload_size_risks, logging_risks, mitigations, findings (array {severity, description, evidence}), approve (boolean).', user_payload: { tech_spec: $json.state.artifacts.TECH_SPEC, implementation: $json.state.artifacts.IMPLEMENTATION } } ]}}"
+      },
+      "id": "CallSecEng",
+      "name": "Call AgentRunner: SECENG_COMPUTE_REVIEW",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 380]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SECENG_COMPUTE_REVIEW', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst review = result.output_json;\nstate.artifacts.SECENG_COMPUTE_REVIEW = { createdAt: now, review };\n\nconst findings = review.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (review.approve === false || hasHigh) {\n  state.gates.seceng.status = 'FAILED';\n  state.blockers.push({ severity: 'HIGH', stage: 'SECENG_COMPUTE_REVIEW', reason: 'SecEng compute review failed', details: review.mitigations || [] });\n  state.stage = 'ENG_BUILD';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'SECENG_COMPUTE_REVIEW', artifact: state.artifacts.SECENG_COMPUTE_REVIEW }];\n}\n\nstate.gates.seceng.status = 'PASSED';\nstate.stage = 'QA';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'SECENG_COMPUTE_REVIEW', artifact: state.artifacts.SECENG_COMPUTE_REVIEW }];"
+      },
+      "id": "SaveSecEng",
+      "name": "Save SecEng Review + Gate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 380]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'QA', system_prompt: 'You are QA. Produce a test plan for this integration. Output ONLY JSON keys: test_matrix (array), unit_tests, integration_tests, failure_injection, load_tests, acceptance_verification, findings (array {severity, description, evidence}), approve (boolean), notes.', user_payload: { prd: $json.state.artifacts.PRD, tech_spec: $json.state.artifacts.TECH_SPEC, implementation: $json.state.artifacts.IMPLEMENTATION } } ]}}"
+      },
+      "id": "CallQA",
+      "name": "Call AgentRunner: QA",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 460]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'QA', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst report = result.output_json;\nstate.artifacts.QA_REPORT = { createdAt: now, report };\n\nconst findings = report.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (report.approve === false || hasHigh) {\n  state.gates.qa.status = 'FAILED';\n  state.blockers.push({ severity: 'HIGH', stage: 'QA', reason: 'QA failed', details: findings });\n  state.stage = 'ENG_BUILD';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'QA', artifact: state.artifacts.QA_REPORT }];\n}\n\nstate.gates.qa.status = 'PASSED';\nstate.stage = 'COMPLIANCE';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'QA', artifact: state.artifacts.QA_REPORT }];"
+      },
+      "id": "SaveQA",
+      "name": "Save QA + Gate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 460]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'COMPLIANCE', system_prompt: 'You are Compliance. Check PII handling, logging, retention, least privilege, auditability for a SOC phishing workflow. Output ONLY JSON keys: controls (array), data_handling, retention, audit_logging, permissions, risks (array {severity, description, evidence}), required_changes (array), approve (boolean), notes.', user_payload: { prd: $json.state.artifacts.PRD, tech_spec: $json.state.artifacts.TECH_SPEC, implementation: $json.state.artifacts.IMPLEMENTATION } } ]}}"
+      },
+      "id": "CallCompliance",
+      "name": "Call AgentRunner: COMPLIANCE",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 540]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'COMPLIANCE', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst report = result.output_json;\nstate.artifacts.COMPLIANCE = { createdAt: now, report };\n\nconst risks = report.risks || [];\nconst hasHigh = risks.some(r => ['HIGH','CRITICAL'].includes(String(r.severity || '').toUpperCase()));\n\nif (report.approve === false || hasHigh) {\n  state.gates.compliance.status = 'FAILED';\n  state.blockers.push({ severity: 'HIGH', stage: 'COMPLIANCE', reason: 'Compliance failed', details: report.required_changes || risks });\n  state.stage = 'ENG_BUILD';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'COMPLIANCE', artifact: state.artifacts.COMPLIANCE }];\n}\n\nstate.gates.compliance.status = 'PASSED';\nstate.stage = 'TESTING_PREPROD';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'COMPLIANCE', artifact: state.artifacts.COMPLIANCE }];"
+      },
+      "id": "SaveCompliance",
+      "name": "Save Compliance + Gate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 540]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'TESTING_PREPROD', system_prompt: 'You are Testing/Release. Produce pre-prod testing checklist including staging deploy steps, key rotation rehearsal, vendor outage simulation, replay/idempotency validation. Output ONLY JSON keys: checklist, staging_steps, outage_sims, rotation_plan, rollback_dry_run, findings (array {severity, description, evidence}), approve (boolean), notes.', user_payload: { tech_spec: $json.state.artifacts.TECH_SPEC, implementation: $json.state.artifacts.IMPLEMENTATION, qa: $json.state.artifacts.QA_REPORT, compliance: $json.state.artifacts.COMPLIANCE } } ]}}"
+      },
+      "id": "CallPreProd",
+      "name": "Call AgentRunner: TESTING_PREPROD",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 620]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'TESTING_PREPROD', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst report = result.output_json;\nstate.artifacts.TESTING_PREPROD = { createdAt: now, report };\n\nconst findings = report.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (report.approve === false || hasHigh) {\n  state.blockers.push({ severity: 'HIGH', stage: 'TESTING_PREPROD', reason: 'Pre-prod testing gate failed', details: findings });\n  state.stage = 'ENG_BUILD';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'TESTING_PREPROD', artifact: state.artifacts.TESTING_PREPROD }];\n}\n\nstate.stage = 'SMOKE_TEST';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'TESTING_PREPROD', artifact: state.artifacts.TESTING_PREPROD }];"
+      },
+      "id": "SavePreProd",
+      "name": "Save Pre-Prod + Gate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 620]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'SMOKE_TEST', system_prompt: 'You are Smoke Test owner. Define post-deploy smoke tests for Graph auth, minimal mailbox read, safe enrichment call, case creation (staging), notification, and audit log verification. Output ONLY JSON keys: smoke_steps, expected_results, rollback_triggers, findings (array {severity, description, evidence}), approve (boolean), notes.', user_payload: { tech_spec: $json.state.artifacts.TECH_SPEC, implementation: $json.state.artifacts.IMPLEMENTATION } } ]}}"
+      },
+      "id": "CallSmoke",
+      "name": "Call AgentRunner: SMOKE_TEST",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 700]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst report = result.output_json;\nstate.artifacts.SMOKE_TEST = { createdAt: now, report };\n\nconst findings = report.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (report.approve === false || hasHigh) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: 'Smoke gate failed', details: findings });\n  state.stage = 'DEPLOY';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];\n}\n\nstate.stage = 'DEPLOY';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];"
+      },
+      "id": "SaveSmoke",
+      "name": "Save Smoke + Gate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 700]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'DEPLOY', system_prompt: 'You are Deploy/SRE. Produce deploy plan + runbook + rollback + monitoring/alerts for this workflow. Output ONLY JSON keys: deploy_steps, config, monitoring, alerts, rollback_plan, runbook, operational_limits, findings (array {severity, description, evidence}), approve (boolean), notes.', user_payload: { tech_spec: $json.state.artifacts.TECH_SPEC, implementation: $json.state.artifacts.IMPLEMENTATION, preprod: $json.state.artifacts.TESTING_PREPROD, smoke: $json.state.artifacts.SMOKE_TEST } } ]}}"
+      },
+      "id": "CallDeploy",
+      "name": "Call AgentRunner: DEPLOY",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 780]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'DEPLOY', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst report = result.output_json;\nstate.artifacts.DEPLOY_REPORT = { createdAt: now, report };\n\nconst findings = report.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (report.approve === false || hasHigh) {\n  state.blockers.push({ severity: 'HIGH', stage: 'DEPLOY', reason: 'Deploy readiness failed', details: findings });\n  state.stage = 'ENG_BUILD';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'DEPLOY', artifact: state.artifacts.DEPLOY_REPORT }];\n}\n\nstate.stage = 'MANAGER_REVIEW';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'DEPLOY', artifact: state.artifacts.DEPLOY_REPORT }];"
+      },
+      "id": "SaveDeploy",
+      "name": "Save Deploy + Gate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 780]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'MANAGER_REVIEW', system_prompt: 'You are SOC Manager reviewer. Evaluate operational impact: false positives, escalation path, analyst workflow, on-call impact, tuning knobs, and maintenance burden. Output ONLY JSON keys: approve (boolean), concerns, required_followups, risk_notes.', user_payload: { prd: $json.state.artifacts.PRD, deploy: $json.state.artifacts.DEPLOY_REPORT, qa: $json.state.artifacts.QA_REPORT, compliance: $json.state.artifacts.COMPLIANCE } } ]}}"
+      },
+      "id": "CallMgr",
+      "name": "Call AgentRunner: MANAGER_REVIEW",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 860]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'MANAGER_REVIEW', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst review = result.output_json;\nstate.artifacts.MANAGER_REVIEW = { createdAt: now, review };\n\nif (review.approve === false) {\n  state.gates.manager.status = 'FAILED';\n  state.blockers.push({ severity: 'HIGH', stage: 'MANAGER_REVIEW', reason: 'Manager did not approve', details: review.required_followups || review.concerns || [] });\n  state.stage = 'DEPLOY';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'MANAGER_REVIEW', artifact: state.artifacts.MANAGER_REVIEW }];\n}\n\nstate.gates.manager.status = 'PASSED';\nstate.stage = 'SR_MANAGER_REVIEW';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'MANAGER_REVIEW', artifact: state.artifacts.MANAGER_REVIEW }];"
+      },
+      "id": "SaveMgr",
+      "name": "Save Manager Review + Gate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 860]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'SR_MANAGER_REVIEW', system_prompt: 'You are Senior Manager reviewer. Governance and risk acceptance. Confirm compliance/QA/SecEng gates and operational readiness. Output ONLY JSON keys: approve (boolean), risk_acceptance, required_followups, decision_notes.', user_payload: { state_summary: { stage: $json.state.stage, gates: $json.state.gates, blockers: $json.state.blockers }, artifacts: { prd: $json.state.artifacts.PRD, seceng: $json.state.artifacts.SECENG_COMPUTE_REVIEW, qa: $json.state.artifacts.QA_REPORT, compliance: $json.state.artifacts.COMPLIANCE, deploy: $json.state.artifacts.DEPLOY_REPORT, mgr: $json.state.artifacts.MANAGER_REVIEW } } } ]}}"
+      },
+      "id": "CallSrMgr",
+      "name": "Call AgentRunner: SR_MANAGER_REVIEW",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 940]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SR_MANAGER_REVIEW', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst review = result.output_json;\nstate.artifacts.SR_MANAGER_REVIEW = { createdAt: now, review };\n\nif (review.approve === false) {\n  state.gates.sr_manager.status = 'FAILED';\n  state.blockers.push({ severity: 'HIGH', stage: 'SR_MANAGER_REVIEW', reason: 'Sr Manager did not approve', details: review.required_followups || [] });\n  state.stage = 'MANAGER_REVIEW';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'SR_MANAGER_REVIEW', artifact: state.artifacts.SR_MANAGER_REVIEW }];\n}\n\nstate.gates.sr_manager.status = 'PASSED';\nstate.stage = 'DIRECTOR_REVIEW';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'SR_MANAGER_REVIEW', artifact: state.artifacts.SR_MANAGER_REVIEW }];"
+      },
+      "id": "SaveSrMgr",
+      "name": "Save Sr Manager Review + Gate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 940]
+    },
+
+    {
+      "parameters": {
+        "workflowId": "={{$env.AGENT_RUNNER_WORKFLOW_ID}}",
+        "options": {},
+        "inputData": "={{[{ run_id: $json.state.run_id, stage: 'DIRECTOR_REVIEW', system_prompt: 'You are the Director reviewer. Decide SHIP / NO_SHIP based on gates and blockers. Output ONLY JSON keys: decision (SHIP|NO_SHIP), rationale, required_followups, risk_acceptance_notes.', user_payload: { state: { run_id: $json.state.run_id, stage: $json.state.stage, gates: $json.state.gates, blockers: $json.state.blockers }, artifacts: { prd: $json.state.artifacts.PRD, tech_spec: $json.state.artifacts.TECH_SPEC, sr_review: $json.state.artifacts.SR_REVIEW, seceng: $json.state.artifacts.SECENG_COMPUTE_REVIEW, qa: $json.state.artifacts.QA_REPORT, compliance: $json.state.artifacts.COMPLIANCE, preprod: $json.state.artifacts.TESTING_PREPROD, smoke: $json.state.artifacts.SMOKE_TEST, deploy: $json.state.artifacts.DEPLOY_REPORT, mgr: $json.state.artifacts.MANAGER_REVIEW, sr_mgr: $json.state.artifacts.SR_MANAGER_REVIEW } } } ]}}"
+      },
+      "id": "CallDirector",
+      "name": "Call AgentRunner: DIRECTOR_REVIEW",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1500, 1020]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'DIRECTOR_REVIEW', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst director = result.output_json;\nstate.artifacts.DIRECTOR_REVIEW = { createdAt: now, director };\n\nstate.gates.director.status = (director.decision === 'SHIP') ? 'PASSED' : 'FAILED';\nstate.status = (director.decision === 'SHIP') ? 'SHIPPED' : 'BLOCKED';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'DIRECTOR_REVIEW', artifact: state.artifacts.DIRECTOR_REVIEW }];"
+      },
+      "id": "SaveDirector",
+      "name": "Save Director Decision",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1720, 1020]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO agentic_artifacts (run_id, stage, artifact_json) VALUES ($1, $2, $3)",
+        "values": "={{[$json.state.run_id, $json.artifactStage || $json.state.stage, JSON.stringify($json.artifact || {})]}}"
+      },
+      "id": "PgSaveArtifact",
+      "name": "Postgres: Save Artifact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1940, 520]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO agentic_runs (run_id, stage, status, state_json) VALUES ($1, $2, $3, $4)\nON CONFLICT (run_id) DO UPDATE SET stage = EXCLUDED.stage, status = EXCLUDED.status, state_json = EXCLUDED.state_json, updated_at = now()",
+        "values": "={{[$json.state.run_id, $json.state.stage, $json.state.status || 'RUNNING', JSON.stringify($json.state)]}}"
+      },
+      "id": "PgUpsertFinal",
+      "name": "Postgres: Upsert State (Final)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [2160, 520]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": { "main": [[{ "node": "Init Run", "type": "main", "index": 0 }]] },
+    "Init Run": { "main": [[{ "node": "Postgres: Load State", "type": "main", "index": 0 }]] },
+    "Postgres: Load State": { "main": [[{ "node": "Use Loaded Or Init", "type": "main", "index": 0 }]] },
+    "Use Loaded Or Init": { "main": [[{ "node": "Postgres: Upsert State (Initial)", "type": "main", "index": 0 }]] },
+    "Postgres: Upsert State (Initial)": { "main": [[{ "node": "Switch Stage", "type": "main", "index": 0 }]] },
+
+    "Switch Stage": {
+      "main": [
+        [{ "node": "Call AgentRunner: PM_SCOPE", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: JR_FRAME", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: ENG_BUILD", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: SR_REVIEW", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: SECENG_COMPUTE_REVIEW", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: QA", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: COMPLIANCE", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: TESTING_PREPROD", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: SMOKE_TEST", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: DEPLOY", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: MANAGER_REVIEW", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: SR_MANAGER_REVIEW", "type": "main", "index": 0 }],
+        [{ "node": "Call AgentRunner: DIRECTOR_REVIEW", "type": "main", "index": 0 }]
+      ]
+    },
+
+    "Call AgentRunner: PM_SCOPE": { "main": [[{ "node": "Save PRD + Advance", "type": "main", "index": 0 }]] },
+    "Save PRD + Advance": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: JR_FRAME": { "main": [[{ "node": "Save TECH_SPEC + Advance", "type": "main", "index": 0 }]] },
+    "Save TECH_SPEC + Advance": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: ENG_BUILD": { "main": [[{ "node": "Save IMPLEMENTATION + Advance", "type": "main", "index": 0 }]] },
+    "Save IMPLEMENTATION + Advance": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: SR_REVIEW": { "main": [[{ "node": "Save SR Review + Gate", "type": "main", "index": 0 }]] },
+    "Save SR Review + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: SECENG_COMPUTE_REVIEW": { "main": [[{ "node": "Save SecEng Review + Gate", "type": "main", "index": 0 }]] },
+    "Save SecEng Review + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: QA": { "main": [[{ "node": "Save QA + Gate", "type": "main", "index": 0 }]] },
+    "Save QA + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: COMPLIANCE": { "main": [[{ "node": "Save Compliance + Gate", "type": "main", "index": 0 }]] },
+    "Save Compliance + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: TESTING_PREPROD": { "main": [[{ "node": "Save Pre-Prod + Gate", "type": "main", "index": 0 }]] },
+    "Save Pre-Prod + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: SMOKE_TEST": { "main": [[{ "node": "Save Smoke + Gate", "type": "main", "index": 0 }]] },
+    "Save Smoke + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: DEPLOY": { "main": [[{ "node": "Save Deploy + Gate", "type": "main", "index": 0 }]] },
+    "Save Deploy + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: MANAGER_REVIEW": { "main": [[{ "node": "Save Manager Review + Gate", "type": "main", "index": 0 }]] },
+    "Save Manager Review + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: SR_MANAGER_REVIEW": { "main": [[{ "node": "Save Sr Manager Review + Gate", "type": "main", "index": 0 }]] },
+    "Save Sr Manager Review + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Call AgentRunner: DIRECTOR_REVIEW": { "main": [[{ "node": "Save Director Decision", "type": "main", "index": 0 }]] },
+    "Save Director Decision": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+
+    "Postgres: Save Artifact": { "main": [[{ "node": "Postgres: Upsert State (Final)", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionTimeout": 3600,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none"
+  },
+  "versionId": "1"
+}
