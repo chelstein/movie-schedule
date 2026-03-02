@@ -11,13 +11,27 @@
     },
     {
       "parameters": {
-        "functionCode": "const input = $json;\n\nconst run_id = input.run_id;\nconst stage = input.stage;\nconst system_prompt = input.system_prompt;\nconst user_payload = input.user_payload;\n\nif (!run_id || !stage || !system_prompt) {\n  return [{ ok: false, error: 'Missing required inputs: run_id, stage, system_prompt', raw_text: null, output_json: null }];\n}\n\nreturn [{ run_id, stage, system_prompt, user_payload: user_payload ?? {} }];"
+        "functionCode": "const input = $json;\n\nconst run_id = input.run_id;\nconst stage = input.stage;\nconst system_prompt = input.system_prompt;\nconst user_payload = input.user_payload;\n\nif (!run_id || !stage || !system_prompt) {\n  // Mark as validation error so downstream can bypass LLM call\n  return [{ ok: false, error: 'Missing required inputs: run_id, stage, system_prompt', raw_text: null, output_json: null, _from_validation: true }];\n}\n\nreturn [{ run_id, stage, system_prompt, user_payload: user_payload ?? {} }];"
       },
       "id": "ValidateInputs",
       "name": "Validate Inputs",
       "type": "n8n-nodes-base.function",
       "typeVersion": 2,
       "position": [430, 220]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            { "value1": "={{!$json._from_validation}}", "value2": true }
+          ]
+        }
+      },
+      "id": "CheckValid",
+      "name": "Skip LLM If Invalid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [630, 220]
     },
     {
       "parameters": {
@@ -33,23 +47,23 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"model\": $env.OPENAI_MODEL || \"gpt-4.1-mini\",\n  \"input\": [\n    {\n      \"role\": \"system\",\n      \"content\": [\n        {\"type\":\"text\",\"text\": $json.system_prompt + \"\\n\\nCRITICAL: Output ONLY valid JSON. No markdown. No prose outside JSON.\"}\n      ]\n    },\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\"type\":\"text\",\"text\": \"Payload:\\n\" + JSON.stringify($json.user_payload, null, 2) + \"\\n\\nOutput ONLY JSON.\"}\n      ]\n    }\n  ]\n}"
+        "jsonBody": "=({\n  \"model\": $env.OPENAI_MODEL || \"gpt-4.1-mini\",\n  \"input\": [\n    {\n      \"role\": \"system\",\n      \"content\": [\n        {\"type\":\"text\",\"text\": $json.system_prompt + \"\\n\\nCRITICAL: Output ONLY valid JSON. No markdown. No prose outside JSON.\"}\n      ]\n    },\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\"type\":\"text\",\"text\": \"Payload:\\n\" + JSON.stringify($json.user_payload, null, 2) + \"\\n\\nOutput ONLY JSON.\"}\n      ]\n    }\n  ]\n})"
       },
       "id": "LLMCall",
       "name": "LLM Call (Strict JSON)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [660, 220]
+      "position": [840, 140]
     },
     {
       "parameters": {
-        "functionCode": "const raw = $json;\n\nconst text = raw?.body?.output?.[0]?.content?.[0]?.text\n  ?? raw?.body?.output_text\n  ?? raw?.body?.choices?.[0]?.message?.content\n  ?? null;\n\nif (!text) {\n  return [{ ok: false, error: 'LLM returned no text', raw_text: null, output_json: null }];\n}\n\ntry {\n  const parsed = JSON.parse(text);\n  return [{ ok: true, error: null, raw_text: text, output_json: parsed }];\n} catch (e) {\n  return [{ ok: false, error: 'LLM output not valid JSON', raw_text: text, output_json: null }];\n}"
+        "functionCode": "// Pass through validation errors without hitting the LLM\nif ($json._from_validation === true) {\n  return [{ ok: false, error: $json.error || 'Validation failed', raw_text: null, output_json: null }];\n}\n\nconst raw = $json;\n\nconst text = raw?.body?.output?.[0]?.content?.[0]?.text\n  ?? raw?.body?.output_text\n  ?? raw?.body?.choices?.[0]?.message?.content\n  ?? null;\n\nif (!text) {\n  return [{ ok: false, error: 'LLM returned no text', raw_text: null, output_json: null }];\n}\n\n// Strip markdown code fences that LLMs sometimes add despite instructions\nconst cleaned = text.replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```\\s*$/i, '').trim();\n\ntry {\n  const parsed = JSON.parse(cleaned);\n  return [{ ok: true, error: null, raw_text: text, output_json: parsed }];\n} catch (e) {\n  return [{ ok: false, error: 'LLM output not valid JSON', raw_text: text, output_json: null }];\n}"
       },
       "id": "ParseJSON",
       "name": "Parse JSON",
       "type": "n8n-nodes-base.function",
       "typeVersion": 2,
-      "position": [890, 220]
+      "position": [1060, 220]
     }
   ],
   "connections": {
@@ -57,7 +71,13 @@
       "main": [[{ "node": "Validate Inputs", "type": "main", "index": 0 }]]
     },
     "Validate Inputs": {
-      "main": [[{ "node": "LLM Call (Strict JSON)", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Skip LLM If Invalid?", "type": "main", "index": 0 }]]
+    },
+    "Skip LLM If Invalid?": {
+      "main": [
+        [{ "node": "LLM Call (Strict JSON)", "type": "main", "index": 0 }],
+        [{ "node": "Parse JSON", "type": "main", "index": 0 }]
+      ]
     },
     "LLM Call (Strict JSON)": {
       "main": [[{ "node": "Parse JSON", "type": "main", "index": 0 }]]

@@ -33,7 +33,7 @@
     },
     {
       "parameters": {
-        "functionCode": "const run_id = $json.run_id;\nconst defaultState = $json.defaultState;\n\nconst rows = $json?.data ?? $json?.rows ?? [];\nconst first = rows?.[0] || null;\n\nlet state;\nif (first && first.state_json) state = first.state_json;\nelse state = defaultState;\n\nreturn [{ run_id, state }];"
+        "functionCode": "// $json here is the Postgres SELECT result; run_id/defaultState come from Init Run\nconst rows = $json?.data ?? $json?.rows ?? [];\nconst first = rows?.[0] || null;\n\nlet state, run_id;\nif (first && first.state_json) {\n  state = typeof first.state_json === 'string' ? JSON.parse(first.state_json) : first.state_json;\n  run_id = state.run_id;\n} else {\n  const initData = $node[\"Init Run\"].json;\n  run_id = initData.run_id;\n  state = initData.defaultState;\n}\n\nreturn [{ run_id, state }];"
       },
       "id": "SelectOrInit",
       "name": "Use Loaded Or Init",
@@ -44,7 +44,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO agentic_runs (run_id, stage, status, state_json) VALUES ($1, $2, $3, $4)\nON CONFLICT (run_id) DO UPDATE SET stage = EXCLUDED.stage, status = EXCLUDED.status, state_json = EXCLUDED.state_json, updated_at = now()",
+        "query": "INSERT INTO agentic_runs (run_id, stage, status, state_json) VALUES ($1, $2, $3, $4)\nON CONFLICT (run_id) DO UPDATE SET stage = EXCLUDED.stage, status = EXCLUDED.status, state_json = EXCLUDED.state_json, updated_at = now()\nRETURNING state_json",
         "values": "={{[$json.state.run_id, $json.state.stage, $json.state.status || 'RUNNING', JSON.stringify($json.state)]}}"
       },
       "id": "PgUpsertInitial",
@@ -277,7 +277,7 @@
     },
     {
       "parameters": {
-        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst report = result.output_json;\nstate.artifacts.SMOKE_TEST = { createdAt: now, report };\n\nconst findings = report.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (report.approve === false || hasHigh) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: 'Smoke gate failed', details: findings });\n  state.stage = 'DEPLOY';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];\n}\n\nstate.stage = 'DEPLOY';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];"
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst report = result.output_json;\nstate.artifacts.SMOKE_TEST = { createdAt: now, report };\n\nconst findings = report.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (report.approve === false || hasHigh) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: 'Smoke gate failed', details: findings });\n  state.stage = 'ENG_BUILD';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];\n}\n\nstate.stage = 'DEPLOY';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];"
       },
       "id": "SaveSmoke",
       "name": "Save Smoke + Gate",
@@ -380,8 +380,19 @@
 
     {
       "parameters": {
+        "functionCode": "// PgUpsertInitial now returns state_json via RETURNING; reshape it for Switch Stage\nconst stateJson = $json.state_json;\nconst state = typeof stateJson === 'string' ? JSON.parse(stateJson) : stateJson;\nreturn [{ run_id: state.run_id, state }];"
+      },
+      "id": "ReshapeState",
+      "name": "Reshape State",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1170, 220]
+    },
+
+    {
+      "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO agentic_artifacts (run_id, stage, artifact_json) VALUES ($1, $2, $3)",
+        "query": "INSERT INTO agentic_artifacts (run_id, stage, artifact_json) VALUES ($1, $2, $3)\nON CONFLICT (run_id, stage) DO UPDATE SET artifact_json = EXCLUDED.artifact_json, updated_at = now()",
         "values": "={{[$json.state.run_id, $json.artifactStage || $json.state.stage, JSON.stringify($json.artifact || {})]}}"
       },
       "id": "PgSaveArtifact",
@@ -408,7 +419,8 @@
     "Init Run": { "main": [[{ "node": "Postgres: Load State", "type": "main", "index": 0 }]] },
     "Postgres: Load State": { "main": [[{ "node": "Use Loaded Or Init", "type": "main", "index": 0 }]] },
     "Use Loaded Or Init": { "main": [[{ "node": "Postgres: Upsert State (Initial)", "type": "main", "index": 0 }]] },
-    "Postgres: Upsert State (Initial)": { "main": [[{ "node": "Switch Stage", "type": "main", "index": 0 }]] },
+    "Postgres: Upsert State (Initial)": { "main": [[{ "node": "Reshape State", "type": "main", "index": 0 }]] },
+    "Reshape State": { "main": [[{ "node": "Switch Stage", "type": "main", "index": 0 }]] },
 
     "Switch Stage": {
       "main": [
