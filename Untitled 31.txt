@@ -33,7 +33,7 @@
     },
     {
       "parameters": {
-        "functionCode": "const run_id = $json.run_id;\nconst defaultState = $json.defaultState;\n\nconst rows = $json?.data ?? $json?.rows ?? [];\nconst first = rows?.[0] || null;\n\nlet state;\nif (first && first.state_json) state = first.state_json;\nelse state = defaultState;\n\nreturn [{ run_id, state }];"
+        "functionCode": "const run_id = $node[\"Init Run\"].json.run_id;\nconst defaultState = $node[\"Init Run\"].json.defaultState;\n\nconst rows = $json?.data ?? $json?.rows ?? [];\nconst first = rows?.[0] || null;\n\nlet state;\nif (first && first.state_json) state = first.state_json;\nelse state = defaultState;\n\nreturn [{ run_id, state }];"
       },
       "id": "SelectOrInit",
       "name": "Use Loaded Or Init",
@@ -277,7 +277,7 @@
     },
     {
       "parameters": {
-        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst report = result.output_json;\nstate.artifacts.SMOKE_TEST = { createdAt: now, report };\n\nconst findings = report.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (report.approve === false || hasHigh) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: 'Smoke gate failed', details: findings });\n  state.stage = 'DEPLOY';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];\n}\n\nstate.stage = 'DEPLOY';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];"
+        "functionCode": "const now = new Date().toISOString();\nconst state = $json.state;\nconst result = $json?.data?.[0] ?? $json;\n\nif (!result.ok) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: result.error, evidence: (result.raw_text || '').slice(0, 1200) });\n  state.updatedAt = now;\n  return [{ state, artifactStage: null, artifact: null }];\n}\n\nconst report = result.output_json;\nstate.artifacts.SMOKE_TEST = { createdAt: now, report };\n\nconst findings = report.findings || [];\nconst hasHigh = findings.some(f => ['HIGH','CRITICAL'].includes(String(f.severity || '').toUpperCase()));\n\nif (report.approve === false || hasHigh) {\n  state.blockers.push({ severity: 'HIGH', stage: 'SMOKE_TEST', reason: 'Smoke gate failed', details: findings });\n  state.stage = 'ENG_BUILD';\n  state.updatedAt = now;\n  return [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];\n}\n\nstate.stage = 'DEPLOY';\nstate.updatedAt = now;\n\nreturn [{ state, artifactStage: 'SMOKE_TEST', artifact: state.artifacts.SMOKE_TEST }];"
       },
       "id": "SaveSmoke",
       "name": "Save Smoke + Gate",
@@ -380,6 +380,58 @@
 
     {
       "parameters": {
+        "functionCode": "return [$node[\"Use Loaded Or Init\"].json];"
+      },
+      "id": "RestoreStatePreSwitch",
+      "name": "Restore State (Pre-Switch)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1170, 220]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "return [$json];"
+      },
+      "id": "CaptureState",
+      "name": "Capture State",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1940, 520]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "return [$node[\"Capture State\"].json];"
+      },
+      "id": "RestoreState",
+      "name": "Restore State",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [2380, 520]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.state.status}}",
+              "operation": "equal",
+              "value2": "RUNNING"
+            }
+          ]
+        }
+      },
+      "id": "IfPipelineRunning",
+      "name": "IF: Pipeline Running",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2600, 520]
+    },
+
+    {
+      "parameters": {
         "operation": "executeQuery",
         "query": "INSERT INTO agentic_artifacts (run_id, stage, artifact_json) VALUES ($1, $2, $3)",
         "values": "={{[$json.state.run_id, $json.artifactStage || $json.state.stage, JSON.stringify($json.artifact || {})]}}"
@@ -408,7 +460,8 @@
     "Init Run": { "main": [[{ "node": "Postgres: Load State", "type": "main", "index": 0 }]] },
     "Postgres: Load State": { "main": [[{ "node": "Use Loaded Or Init", "type": "main", "index": 0 }]] },
     "Use Loaded Or Init": { "main": [[{ "node": "Postgres: Upsert State (Initial)", "type": "main", "index": 0 }]] },
-    "Postgres: Upsert State (Initial)": { "main": [[{ "node": "Switch Stage", "type": "main", "index": 0 }]] },
+    "Postgres: Upsert State (Initial)": { "main": [[{ "node": "Restore State (Pre-Switch)", "type": "main", "index": 0 }]] },
+    "Restore State (Pre-Switch)": { "main": [[{ "node": "Switch Stage", "type": "main", "index": 0 }]] },
 
     "Switch Stage": {
       "main": [
@@ -429,45 +482,52 @@
     },
 
     "Call AgentRunner: PM_SCOPE": { "main": [[{ "node": "Save PRD + Advance", "type": "main", "index": 0 }]] },
-    "Save PRD + Advance": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save PRD + Advance": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: JR_FRAME": { "main": [[{ "node": "Save TECH_SPEC + Advance", "type": "main", "index": 0 }]] },
-    "Save TECH_SPEC + Advance": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save TECH_SPEC + Advance": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: ENG_BUILD": { "main": [[{ "node": "Save IMPLEMENTATION + Advance", "type": "main", "index": 0 }]] },
-    "Save IMPLEMENTATION + Advance": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save IMPLEMENTATION + Advance": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: SR_REVIEW": { "main": [[{ "node": "Save SR Review + Gate", "type": "main", "index": 0 }]] },
-    "Save SR Review + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save SR Review + Gate": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: SECENG_COMPUTE_REVIEW": { "main": [[{ "node": "Save SecEng Review + Gate", "type": "main", "index": 0 }]] },
-    "Save SecEng Review + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save SecEng Review + Gate": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: QA": { "main": [[{ "node": "Save QA + Gate", "type": "main", "index": 0 }]] },
-    "Save QA + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save QA + Gate": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: COMPLIANCE": { "main": [[{ "node": "Save Compliance + Gate", "type": "main", "index": 0 }]] },
-    "Save Compliance + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save Compliance + Gate": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: TESTING_PREPROD": { "main": [[{ "node": "Save Pre-Prod + Gate", "type": "main", "index": 0 }]] },
-    "Save Pre-Prod + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save Pre-Prod + Gate": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: SMOKE_TEST": { "main": [[{ "node": "Save Smoke + Gate", "type": "main", "index": 0 }]] },
-    "Save Smoke + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save Smoke + Gate": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: DEPLOY": { "main": [[{ "node": "Save Deploy + Gate", "type": "main", "index": 0 }]] },
-    "Save Deploy + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save Deploy + Gate": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: MANAGER_REVIEW": { "main": [[{ "node": "Save Manager Review + Gate", "type": "main", "index": 0 }]] },
-    "Save Manager Review + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save Manager Review + Gate": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: SR_MANAGER_REVIEW": { "main": [[{ "node": "Save Sr Manager Review + Gate", "type": "main", "index": 0 }]] },
-    "Save Sr Manager Review + Gate": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save Sr Manager Review + Gate": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
     "Call AgentRunner: DIRECTOR_REVIEW": { "main": [[{ "node": "Save Director Decision", "type": "main", "index": 0 }]] },
-    "Save Director Decision": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Save Director Decision": { "main": [[{ "node": "Capture State", "type": "main", "index": 0 }]] },
 
-    "Postgres: Save Artifact": { "main": [[{ "node": "Postgres: Upsert State (Final)", "type": "main", "index": 0 }]] }
+    "Capture State": { "main": [[{ "node": "Postgres: Save Artifact", "type": "main", "index": 0 }]] },
+    "Postgres: Save Artifact": { "main": [[{ "node": "Postgres: Upsert State (Final)", "type": "main", "index": 0 }]] },
+    "Postgres: Upsert State (Final)": { "main": [[{ "node": "Restore State", "type": "main", "index": 0 }]] },
+    "Restore State": { "main": [[{ "node": "IF: Pipeline Running", "type": "main", "index": 0 }]] },
+    "IF: Pipeline Running": { "main": [
+      [{ "node": "Switch Stage", "type": "main", "index": 0 }],
+      []
+    ]}
   },
   "active": false,
   "settings": {
